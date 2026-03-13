@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.interaction_log import InteractionLog
     from src.search_analytics import SearchAnalyticsDB
 
 logger = logging.getLogger(__name__)
@@ -32,40 +31,6 @@ from src.search import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Lazy singletons
 # ---------------------------------------------------------------------------
-
-_analytics: SearchAnalyticsDB | None = None
-_interaction_log: InteractionLog | None = None
-
-
-def _get_analytics() -> SearchAnalyticsDB:
-    global _analytics
-    if _analytics is None:
-        from src.search_analytics import SearchAnalyticsDB
-
-        _analytics = SearchAnalyticsDB()
-    return _analytics
-
-
-def _get_interaction_log() -> InteractionLog:
-    global _interaction_log
-    if _interaction_log is None:
-        from src.interaction_log import InteractionLog
-
-        _interaction_log = InteractionLog()
-    return _interaction_log
-
-
-def _log_interaction(
-    tool_name: str,
-    input_summary: str,
-    output_summary: str,
-    duration_ms: int | None = None,
-) -> None:
-    """Helper: log an interaction via the singleton InteractionLog."""
-    if duration_ms is not None:
-        _get_interaction_log().log(tool_name, input_summary, output_summary, duration_ms)
-    else:
-        _get_interaction_log().log(tool_name, input_summary, output_summary)
 
 
 # ---------------------------------------------------------------------------
@@ -94,17 +59,6 @@ def search_documents(
     except Exception as exc:
         logger.error("Search failed: %s", exc)
         return "Couldn't search yet — your documents haven't been indexed. Try asking me to 'index my documents' first."
-    _elapsed = (_time.monotonic() - _t0) * 1000
-    _get_analytics().log_query(
-        query.strip(), top_k, len(results), _elapsed, project, doc_type, "search"
-    )
-    _log_interaction(
-        "search_documents",
-        f"query={query.strip()!r} top_k={top_k} project={project}",
-        f"{len(results)} results in {_elapsed:.0f}ms",
-        int(_elapsed),
-    )
-
     if not results:
         msg = "I couldn't find anything matching that."
         suggestions = suggest_alternative_queries(query.strip())
@@ -232,7 +186,7 @@ def read_file(file_path: str) -> str:
     return content
 
 
-def project_status(project_id: str | None = None) -> str:
+def __project_status(project_id: str | None = None) -> str:
     """Get project status. If no project_id, returns all projects summary."""
     from src.project_status import get_all_projects_summary, get_project_status
 
@@ -241,7 +195,7 @@ def project_status(project_id: str | None = None) -> str:
     return get_all_projects_summary()
 
 
-def audit_prd(
+def __audit_prd(
     file_path: str,
     check_sprawl: bool = False,
     check_consistency: bool = False,
@@ -336,32 +290,6 @@ def explore_connections(query: str, top_k: int = 10) -> str:
 
 
 # --- Similarity Tools ---
-
-
-def find_similar(source_path: str, top_k: int = 5) -> str:
-    """Find documents similar to the given source file."""
-    if not source_path or not source_path.strip():
-        return "Please provide a source file path."
-    top_k = max(1, min(top_k, 20))
-    from src.similarity import find_similar_documents
-
-    try:
-        results = find_similar_documents(source_path.strip(), top_k=top_k)
-    except Exception as exc:
-        logger.error("Similarity search failed: %s", exc)
-        return f"Error: {exc}"
-
-    if not results:
-        return "No similar documents found."
-
-    lines = [f"Documents similar to `{Path(source_path).name}`:", ""]
-    for i, r in enumerate(results, 1):
-        sim = r["similarity"] * 100
-        section = f" > {r['section']}" if r.get("section") else ""
-        lines.append(f"[{i}] {r['file_name']}{section} ({sim:.0f}%)")
-        lines.append(f"    {r['text_preview']}")
-    return "\n".join(lines)
-
 
 # --- Tag Tools ---
 
