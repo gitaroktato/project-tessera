@@ -48,8 +48,93 @@ from src.search import search  # noqa: E402  — kept so tests can patch mcp_ser
 from src import core  # noqa: E402
 
 
+@asynccontextmanager
+async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
+    """Run auto-sync on server startup, then watch for file changes."""
+    ctx = {}
+    watcher = None
+
+    if workspace.sync_auto:
+        try:
+            from src.graph.vector_store import OntologyVectorStore
+            from src.ingestion.pipeline import IngestionPipeline
+            from src.sync import FileMetaDB, run_incremental_sync
+
+            meta_db = FileMetaDB(workspace.meta_db_path)
+            vector_store = OntologyVectorStore()
+            pipeline = IngestionPipeline(vector_store=vector_store)
+
+            def _ingest(paths: list[Path]) -> tuple[int, dict[str, int]]:
+                return pipeline.run(source_paths=paths)
+
+            def _do_background_sync() -> None:
+                """Run sync in background so server starts immediately."""
+                try:
+                    result = run_incremental_sync(
+                        ws=workspace,
+                        meta_db=meta_db,
+                        vector_store_delete_fn=vector_store.delete_by_source,
+                        ingest_fn=_ingest,
+                    )
+                    if result.has_changes:
+                        invalidate_search_cache()
+                    logger.info("Background auto-sync complete: %s", result.summary())
+                except Exception as exc:
+                    logger.warning("Background auto-sync failed: %s", exc)
+
+            # Run sync in background thread — server starts immediately
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, _do_background_sync)
+            logger.info("Auto-sync started in background")
+
+            ctx["meta_db"] = meta_db
+
+            # Start file watcher for continuous auto-sync
+            from src.file_watcher import FileWatcher
+
+            def _on_file_change() -> None:
+                """Callback: re-run incremental sync when files change."""
+                try:
+                    sync_result = run_incremental_sync(
+                        ws=workspace,
+                        meta_db=meta_db,
+                        vector_store_delete_fn=vector_store.delete_by_source,
+                        ingest_fn=_ingest,
+                    )
+                    if sync_result.has_changes:
+                        invalidate_search_cache()
+                        logger.info("File watcher sync: %s", sync_result.summary())
+                except Exception as exc:
+                    logger.warning("File watcher sync failed: %s", exc)
+
+            watch_dirs = workspace.all_source_paths()
+            watcher = FileWatcher(
+                watch_dirs=watch_dirs,
+                extensions=workspace.extensions,
+                on_change=_on_file_change,
+                poll_interval=workspace.watcher.poll_interval,
+                debounce=workspace.watcher.debounce,
+            )
+            watcher.start()
+            ctx["watcher"] = watcher
+            logger.info("File watcher started for %d directories", len(watch_dirs))
+
+        except Exception as exc:
+            logger.warning("Auto-sync failed (non-fatal): %s", exc)
+
+    try:
+        yield ctx
+    finally:
+        if watcher:
+            watcher.stop()
+            logger.info("File watcher stopped")
+
+
 mcp = FastMCP(
     name="tessera",
+    lifespan=lifespan,
     instructions=(
         "Tessera provides semantic search across the user's local workspace documents "
         "and cross-session memory.\n\n"
